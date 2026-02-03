@@ -1,0 +1,19 @@
+﻿# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environment variables / secrets
+.env
+
+# Outputs (generated files)
+output/
+*.docx
+*.pptx
+*.pdf
+
+# OS / Editor
+.DS_Store
+.vscode/
