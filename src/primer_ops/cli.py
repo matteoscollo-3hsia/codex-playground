@@ -19,8 +19,18 @@ def main() -> int:
     )
     gen_parser.add_argument(
         "--sheet",
-        default="Company and Industry Intro",
-        help="Excel sheet name (default: Company and Industry Intro)",
+        default=None,
+        help="Excel sheet name (default: run all runnable sheets)",
+    )
+    gen_parser.add_argument(
+        "--include",
+        default=None,
+        help="Regex or comma-separated list of sheet names to include",
+    )
+    gen_parser.add_argument(
+        "--exclude",
+        default=None,
+        help="Regex or comma-separated list of sheet names to exclude",
     )
 
     args = parser.parse_args()
@@ -30,7 +40,12 @@ def main() -> int:
         return 0
 
     if args.command == "generate-primer":
-        generate_primer(output_dir=args.output_dir, sheet=args.sheet)
+        generate_primer(
+            output_dir=args.output_dir,
+            sheet=args.sheet,
+            include=args.include,
+            exclude=args.exclude,
+        )
         return 0
 
     parser.print_help()

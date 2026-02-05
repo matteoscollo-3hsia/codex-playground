@@ -34,6 +34,19 @@ def _find_anchor_exact(ws, label: str, start_row: int = 1) -> Optional[Any]:
     return None
 
 
+def _find_anchor_exact_in_window(
+    ws, label: str, start_row: int, end_row: int
+) -> Optional[Any]:
+    if end_row <= start_row:
+        return None
+    target = _normalize(label)
+    for row in ws.iter_rows(min_row=start_row, max_row=end_row - 1):
+        for cell in row:
+            if isinstance(cell.value, str) and _normalize(cell.value) == target:
+                return cell
+    return None
+
+
 def _find_anchor_contains(ws, label: str, start_row: int = 1) -> Optional[Any]:
     target = _normalize(label)
     for cell in _iter_cells(ws):
@@ -58,16 +71,21 @@ def _first_right_value(ws, row: int, col: int, limit: int = 6) -> Optional[Any]:
     return None
 
 
-def _replace_placeholders(text: str, company_name: str) -> str:
-    return (
-        text.replace("{{client}}", company_name)
-        .replace("{{company_name}}", company_name)
-        .replace("{company_name}", company_name)
-        .replace("#client#", company_name)
-        .replace("#company_name#", company_name)
-        .replace("#company#", company_name)
-        .replace("<<COMPANY_NAME>>", company_name)
-    )
+def _replace_placeholders(text: str, lead: dict[str, Any]) -> str:
+    updated = text
+    for key in sorted(lead.keys(), key=lambda k: len(str(k)), reverse=True):
+        raw_value = lead[key]
+        value = str(raw_value)
+        updated = updated.replace(f"{{{{{key}}}}}", value)
+        updated = updated.replace(f"{{{key}}}", value)
+        updated = updated.replace(f"#{key}#", value)
+        updated = re.sub(
+            rf"<<\s*{re.escape(str(key))}\s*>>",
+            value,
+            updated,
+            flags=re.IGNORECASE,
+        )
+    return updated
 
 
 def _response_to_dict(response: Any) -> dict[str, Any]:
@@ -88,6 +106,29 @@ def _find_step1_anchor(ws, start_row: int = 1) -> Optional[Any]:
         if isinstance(cell.value, str) and pattern.search(cell.value.strip()):
             return cell
     return None
+
+
+def _find_step_anchor(ws, step_number: int, start_row: int = 1) -> Optional[Any]:
+    pattern = re.compile(rf"^step\s*{step_number}(\D|$)", re.IGNORECASE)
+    for cell in _iter_cells(ws):
+        if cell.row < start_row:
+            continue
+        if isinstance(cell.value, str) and pattern.search(cell.value.strip()):
+            return cell
+    return None
+
+
+def _parse_step_title(step_value: Any, step_number: int) -> tuple[str, str | None]:
+    step_label = f"Step {step_number}"
+    if not isinstance(step_value, str):
+        return step_label, None
+    raw = step_value.strip()
+    if not raw:
+        return step_label, None
+    parts = re.split(r"\s[–\-:]\s", raw, maxsplit=1)
+    if len(parts) > 1 and parts[1].strip():
+        return step_label, parts[1].strip()
+    return step_label, None
 
 
 def _is_model_not_found_error(err: Exception) -> bool:
@@ -139,7 +180,12 @@ def _call_openai_with_retries(
             attempt += 1
 
 
-def generate_primer(output_dir: str | None = None, sheet: str = "Company and Industry Intro") -> None:
+def generate_primer(
+    output_dir: str | None = None,
+    sheet: str | None = None,
+    include: str | None = None,
+    exclude: str | None = None,
+) -> None:
     env_path = find_dotenv(usecwd=True)
     load_dotenv(env_path, override=True)
     t0 = time.perf_counter()
@@ -175,6 +221,12 @@ def generate_primer(output_dir: str | None = None, sheet: str = "Company and Ind
     company_name = str(lead.get("company_name", "")).strip()
     if not company_name:
         raise SystemExit("ERROR: company_name missing from lead_input.json")
+    lead_plus = dict(lead)
+    lead_plus["client"] = company_name
+    lead_plus["company"] = company_name
+    lead_plus["company_name"] = company_name
+    for key in list(lead_plus.keys()):
+        lead_plus[str(key).upper()] = lead_plus[key]
 
     prompt_path = Path(prompt_library_path)
     if not prompt_path.is_absolute():
@@ -182,212 +234,331 @@ def generate_primer(output_dir: str | None = None, sheet: str = "Company and Ind
         prompt_path = repo_root / prompt_path
     log_step("Loading prompt library (Excel)")
     workbook = load_workbook(prompt_path, data_only=True)
-    if sheet not in workbook.sheetnames:
-        raise SystemExit(f"ERROR: sheet not found: {sheet}")
-    ws = workbook[sheet]
 
-    log_step("Parsing sheet anchors and building prompt")
-    instructions_cell = _require_anchor(_find_anchor_exact(ws, "Instructions"), "Instructions")
-    web_search_cell = _require_anchor(
-        _find_anchor_exact(ws, "Web Search", start_row=instructions_cell.row),
-        "Web Search",
-    )
-    web_search_value = _first_right_value(ws, web_search_cell.row, web_search_cell.column)
-    if web_search_value is None:
-        raise SystemExit("ERROR: missing anchor: Web Search")
-    deep_research_cell = _require_anchor(
-        _find_anchor_exact(ws, "Deep Research", start_row=instructions_cell.row),
-        "Deep Research",
-    )
-    deep_research_value = _first_right_value(
-        ws, deep_research_cell.row, deep_research_cell.column, limit=20
-    )
-    if deep_research_value is None:
-        raise SystemExit("ERROR: missing anchor: Deep Research")
-
-    prompts_cell = _require_anchor(_find_anchor_exact(ws, "Prompts"), "Prompts")
-    step1_cell = _require_anchor(_find_step1_anchor(ws, start_row=prompts_cell.row), "Step 1")
-    suggested_prompt_cell = _require_anchor(
-        _find_anchor_exact(ws, "Suggested Prompt", start_row=step1_cell.row),
-        "Suggested Prompt",
-    )
-    suggested_prompt_value = _first_right_value(
-        ws, suggested_prompt_cell.row, suggested_prompt_cell.column
-    )
-    if not isinstance(suggested_prompt_value, str) or not suggested_prompt_value.strip():
-        raise SystemExit("ERROR: missing anchor: Suggested Prompt")
-
-    reasoning_effort: str | None = None
-    gpt_model_cell = _find_anchor_exact(ws, "GPT Model", start_row=instructions_cell.row)
-    if gpt_model_cell is not None:
-        gpt_model_value = _first_right_value(ws, gpt_model_cell.row, gpt_model_cell.column)
-        if isinstance(gpt_model_value, str):
-            normalized = gpt_model_value.strip()
-            if normalized == "Thinking - Reasoning: Extended":
-                reasoning_effort = "xhigh"
-            elif normalized == "Thinking":
-                reasoning_effort = "high"
-            elif normalized == "Auto":
-                reasoning_effort = None
-
-    prompt = _replace_placeholders(suggested_prompt_value, company_name)
-
-    web_search_enabled = _normalize(str(web_search_value)).startswith("enable")
-    deep_research_requested = _normalize(str(deep_research_value)).startswith("enable")
-    if deep_research_requested and not web_search_enabled:
-        raise SystemExit(
-            "ERROR: Deep Research is Enable but Web Search is not Enable. Deep Research needs a data source."
+    def is_runnable_sheet(candidate_ws) -> bool:
+        return (_find_anchor_exact(candidate_ws, "Instructions") is not None) and (
+            _find_anchor_exact(candidate_ws, "Prompts") is not None
         )
 
-    client = OpenAI()
-    model = base_model
-    web_tool_type: str | None = "web_search" if web_search_enabled else None
-    deep_research_effective = False
-    deep_research_error_reason: str | None = None
-    request_used: dict[str, Any] = {}
-    response: Any | None = None
-    error_info: dict[str, str] | None = None
+    def parse_sheet_filter(filter_value: str, available: list[str]) -> set[str]:
+        if "," in filter_value:
+            requested = [item.strip() for item in filter_value.split(",") if item.strip()]
+            available_by_lower = {name.lower(): name for name in available}
+            matched = set()
+            for name in requested:
+                match = available_by_lower.get(name.lower())
+                if match:
+                    matched.add(match)
+            return matched
+        regex = re.compile(filter_value, re.IGNORECASE)
+        return {name for name in available if regex.search(name)}
 
-    log_step("Calling OpenAI (this can take a bit)")
-    with spinner("Waiting for OpenAI response"):
-        if deep_research_requested:
-            request_kwargs = {"model": deep_model, "input": prompt}
-            if web_search_enabled:
-                request_kwargs["tools"] = [{"type": "web_search_preview"}]
-            try:
-                response = _call_openai_with_retries(
-                    client,
-                    request_kwargs,
-                    max_retries=max_retries,
-                    base_sleep_seconds=base_sleep_seconds,
-                )
-                model = deep_model
-                web_tool_type = "web_search_preview" if web_search_enabled else None
-                deep_research_effective = True
-                request_used = {
-                    "model": request_kwargs.get("model"),
-                    "tools": request_kwargs.get("tools"),
-                    "reasoning": request_kwargs.get("reasoning"),
-                }
-            except Exception as err:
-                if isinstance(err, RateLimitError):
-                    deep_research_error_reason = _format_error_reason(err)
-                elif not _is_model_not_found_error(err):
-                    raise
-                else:
-                    deep_research_error_reason = _format_error_reason(err)
-                model = base_model
-                web_tool_type = "web_search" if web_search_enabled else None
-                request_kwargs = {"model": model, "input": prompt}
-                if web_search_enabled:
-                    request_kwargs["tools"] = [{"type": "web_search"}]
-                if reasoning_effort is not None:
-                    request_kwargs["reasoning"] = {"effort": reasoning_effort}
-                request_used = {
-                    "model": request_kwargs.get("model"),
-                    "tools": request_kwargs.get("tools"),
-                    "reasoning": request_kwargs.get("reasoning"),
-                }
-                try:
-                    response = _call_openai_with_retries(
-                        client,
-                        request_kwargs,
-                        max_retries=max_retries,
-                        base_sleep_seconds=base_sleep_seconds,
-                    )
-                except RateLimitError as err_fallback:
-                    error_info = {"type": type(err_fallback).__name__, "message": str(err_fallback)}
-        else:
-            request_kwargs = {"model": model, "input": prompt}
-            if web_search_enabled:
-                request_kwargs["tools"] = [{"type": "web_search"}]
-            if reasoning_effort is not None:
-                request_kwargs["reasoning"] = {"effort": reasoning_effort}
-            request_used = {
-                "model": request_kwargs.get("model"),
-                "tools": request_kwargs.get("tools"),
-                "reasoning": request_kwargs.get("reasoning"),
-            }
-            try:
-                response = _call_openai_with_retries(
-                    client,
-                    request_kwargs,
-                    max_retries=max_retries,
-                    base_sleep_seconds=base_sleep_seconds,
-                )
-            except RateLimitError as err:
-                error_info = {"type": type(err).__name__, "message": str(err)}
-    effort_effective = None if deep_research_effective else reasoning_effort
+    runnable_sheets = [name for name in workbook.sheetnames if is_runnable_sheet(workbook[name])]
 
-    print(
-        " ".join(
-            [
-                f"model={model}",
-                f"effort={effort_effective}",
-                f"web_search={web_search_enabled}",
-                f"deep_research_requested={deep_research_requested}",
-                f"deep_research_effective={deep_research_effective}",
-                f"web_tool_type={web_tool_type}",
+    if sheet:
+        if sheet not in workbook.sheetnames:
+            raise SystemExit(f"ERROR: sheet not found: {sheet}")
+        if sheet not in runnable_sheets:
+            raise SystemExit(
+                f"ERROR: sheet is not runnable (missing Instructions/Prompts): {sheet}"
+            )
+        selected_sheets = [sheet]
+    else:
+        selected_sheets = list(runnable_sheets)
+
+    if sheet is None:
+        if include:
+            selected_sheets = [
+                name for name in selected_sheets if name in parse_sheet_filter(include, selected_sheets)
             ]
+        if exclude:
+            excluded = parse_sheet_filter(exclude, selected_sheets)
+            selected_sheets = [name for name in selected_sheets if name not in excluded]
+
+    if not selected_sheets:
+        raise SystemExit("ERROR: no runnable sheets selected.")
+
+    print(f"Sheets to run: {', '.join(selected_sheets)}")
+
+    primer_sections: list[str] = ["# Commercial Primer"]
+    sources_payload = {
+        "prompt_library_path": str(prompt_path),
+        "sheets": [],
+    }
+
+    first_sheet_written = False
+    client = OpenAI()
+
+    for sheet_index, sheet_name in enumerate(selected_sheets, start=1):
+        ws = workbook[sheet_name]
+        log_step(f"Parsing sheet anchors and building prompt ({sheet_name})")
+        instructions_cell = _require_anchor(_find_anchor_exact(ws, "Instructions"), "Instructions")
+        web_search_cell = _require_anchor(
+            _find_anchor_exact(ws, "Web Search", start_row=instructions_cell.row),
+            "Web Search",
         )
-    )
+        web_search_value = _first_right_value(ws, web_search_cell.row, web_search_cell.column)
+        if web_search_value is None:
+            raise SystemExit("ERROR: missing anchor: Web Search")
+        deep_research_cell = _require_anchor(
+            _find_anchor_exact(ws, "Deep Research", start_row=instructions_cell.row),
+            "Deep Research",
+        )
+        deep_research_value = _first_right_value(
+            ws, deep_research_cell.row, deep_research_cell.column, limit=20
+        )
+        if deep_research_value is None:
+            raise SystemExit("ERROR: missing anchor: Deep Research")
 
+        reasoning_effort: str | None = None
+        gpt_model_cell = _find_anchor_exact(ws, "GPT Model", start_row=instructions_cell.row)
+        if gpt_model_cell is not None:
+            gpt_model_value = _first_right_value(ws, gpt_model_cell.row, gpt_model_cell.column)
+            if isinstance(gpt_model_value, str):
+                normalized = gpt_model_value.strip()
+                if normalized == "Thinking - Reasoning: Extended":
+                    reasoning_effort = "xhigh"
+                elif normalized == "Thinking":
+                    reasoning_effort = "high"
+                elif normalized == "Auto":
+                    reasoning_effort = None
 
-    if response is None:
-        log_step("Saving outputs")
-        sources_path = output_dir_path / "sources_step1.json"
-        sources_payload = {
-            "prompt": prompt,
-            "model": model,
-            "reasoning_effort_requested": reasoning_effort,
-            "reasoning_effort_effective": effort_effective,
+        web_search_enabled = _normalize(str(web_search_value)).startswith("enable")
+        deep_research_requested = _normalize(str(deep_research_value)).startswith("enable")
+        if deep_research_requested and not web_search_enabled:
+            raise SystemExit(
+                "ERROR: Deep Research is Enable but Web Search is not Enable. Deep Research needs a data source."
+            )
+
+        sheet_entry = {
+            "name": sheet_name,
             "web_search": web_search_enabled,
             "deep_research_requested": deep_research_requested,
-            "deep_research_effective": deep_research_effective,
-            "deep_research_error_reason": deep_research_error_reason,
-            "web_tool_type": web_tool_type,
-            "request_used": request_used,
-            "error": error_info,
+            "deep_research_effective": False,
+            "deep_research_error_reason": None,
+            "steps": [],
         }
-        sources_path.write_text(
-            json.dumps(sources_payload, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
-        raise SystemExit(
-            "ERROR: OpenAI rate limit exceeded after retries. "
-            "Please try again later."
-        )
 
-    output_text = getattr(response, "output_text", None)
-    if output_text is None:
-        response_dict = _response_to_dict(response)
-        output_text = ""
-        for item in response_dict.get("output", []) or []:
-            if item.get("type") == "output_text" and item.get("text"):
-                output_text = item["text"]
+        primer_sections.append(f"## {sheet_name}")
+
+        prompts_cell = _require_anchor(_find_anchor_exact(ws, "Prompts"), "Prompts")
+        step_number = 1
+        while True:
+            step_cell = _find_step_anchor(ws, step_number, start_row=prompts_cell.row)
+            if step_cell is None:
                 break
+            step_label, step_title_clean = _parse_step_title(step_cell.value, step_number)
+            if step_title_clean:
+                heading = f"### {step_label} — {step_title_clean}"
+            else:
+                heading = f"### {step_label}"
+
+            step_entry = {
+                "step_number": step_number,
+                "title": step_title_clean or step_label,
+                "prompt_final": None,
+                "model": None,
+                "web_tool_type": None,
+                "request_used": None,
+                "response": None,
+                "deep_research_effective": False,
+                "deep_research_error_reason": None,
+                "error": None,
+            }
+            try:
+                next_step_cell = _find_step_anchor(ws, step_number + 1, start_row=step_cell.row + 1)
+                end_row = next_step_cell.row if next_step_cell is not None else ws.max_row + 1
+                suggested_prompt_cell = _find_anchor_exact_in_window(
+                    ws, "Suggested Prompt", start_row=step_cell.row, end_row=end_row
+                )
+                if suggested_prompt_cell is None:
+                    raise ValueError(f"ERROR: missing anchor: Suggested Prompt (step {step_number})")
+                suggested_prompt_value = _first_right_value(
+                    ws, suggested_prompt_cell.row, suggested_prompt_cell.column, limit=20
+                )
+                if not isinstance(suggested_prompt_value, str) or not suggested_prompt_value.strip():
+                    raise ValueError("ERROR: missing anchor: Suggested Prompt")
+
+                prompt = _replace_placeholders(suggested_prompt_value, lead_plus)
+                step_entry["prompt_final"] = prompt
+
+                model = base_model
+                web_tool_type: str | None = "web_search" if web_search_enabled else None
+                deep_research_effective = False
+                deep_research_error_reason: str | None = None
+                request_used: dict[str, Any] = {}
+                response: Any | None = None
+                error_info: dict[str, str] | None = None
+
+                call_label = f"[sheet {sheet_index}/{len(selected_sheets)}][step {step_number}]"
+                call_start = time.perf_counter()
+                print(f"{call_label} Calling OpenAI...")
+                if deep_research_requested:
+                    request_kwargs = {"model": deep_model, "input": prompt}
+                    if web_search_enabled:
+                        request_kwargs["tools"] = [{"type": "web_search_preview"}]
+                    try:
+                        response = _call_openai_with_retries(
+                            client,
+                            request_kwargs,
+                            max_retries=max_retries,
+                            base_sleep_seconds=base_sleep_seconds,
+                        )
+                        model = deep_model
+                        web_tool_type = "web_search_preview" if web_search_enabled else None
+                        deep_research_effective = True
+                        request_used = {
+                            "model": request_kwargs.get("model"),
+                            "tools": request_kwargs.get("tools"),
+                            "reasoning": request_kwargs.get("reasoning"),
+                        }
+                    except (RateLimitError, NotFoundError) as err:
+                        if isinstance(err, RateLimitError):
+                            deep_research_error_reason = _format_error_reason(err)
+                        elif not _is_model_not_found_error(err):
+                            raise
+                        else:
+                            deep_research_error_reason = _format_error_reason(err)
+                        model = base_model
+                        web_tool_type = "web_search" if web_search_enabled else None
+                        request_kwargs = {"model": model, "input": prompt}
+                        if web_search_enabled:
+                            request_kwargs["tools"] = [{"type": "web_search"}]
+                        if reasoning_effort is not None:
+                            request_kwargs["reasoning"] = {"effort": reasoning_effort}
+                        request_used = {
+                            "model": request_kwargs.get("model"),
+                            "tools": request_kwargs.get("tools"),
+                            "reasoning": request_kwargs.get("reasoning"),
+                        }
+                        try:
+                            response = _call_openai_with_retries(
+                                client,
+                                request_kwargs,
+                                max_retries=max_retries,
+                                base_sleep_seconds=base_sleep_seconds,
+                            )
+                        except RateLimitError as err_fallback:
+                            error_info = {
+                                "type": type(err_fallback).__name__,
+                                "message": str(err_fallback),
+                            }
+                else:
+                    request_kwargs = {"model": model, "input": prompt}
+                    if web_search_enabled:
+                        request_kwargs["tools"] = [{"type": "web_search"}]
+                    if reasoning_effort is not None:
+                        request_kwargs["reasoning"] = {"effort": reasoning_effort}
+                    request_used = {
+                        "model": request_kwargs.get("model"),
+                        "tools": request_kwargs.get("tools"),
+                        "reasoning": request_kwargs.get("reasoning"),
+                    }
+                    try:
+                        response = _call_openai_with_retries(
+                            client,
+                            request_kwargs,
+                            max_retries=max_retries,
+                            base_sleep_seconds=base_sleep_seconds,
+                        )
+                    except RateLimitError as err:
+                        error_info = {"type": type(err).__name__, "message": str(err)}
+
+                effort_effective = None if deep_research_effective else reasoning_effort
+                call_elapsed = time.perf_counter() - call_start
+                print(f"{call_label} Done in {format_seconds(call_elapsed)}")
+
+                print(
+                    " ".join(
+                        [
+                            f"model={model}",
+                            f"effort={effort_effective}",
+                            f"web_search={web_search_enabled}",
+                            f"deep_research_requested={deep_research_requested}",
+                            f"deep_research_effective={deep_research_effective}",
+                            f"web_tool_type={web_tool_type}",
+                        ]
+                    )
+                )
+
+                output_text = ""
+                if response is not None:
+                    output_text = getattr(response, "output_text", None)
+                    if output_text is None:
+                        response_dict = _response_to_dict(response)
+                        for item in response_dict.get("output", []) or []:
+                            if item.get("type") == "output_text" and item.get("text"):
+                                output_text = item["text"]
+                                break
+
+                step_entry["model"] = model
+                step_entry["web_tool_type"] = web_tool_type
+                step_entry["request_used"] = request_used
+                step_entry["response"] = _response_to_dict(response) if response is not None else None
+                step_entry["deep_research_effective"] = deep_research_effective
+                step_entry["deep_research_error_reason"] = deep_research_error_reason
+                step_entry["error"] = error_info
+
+                primer_sections.append(heading)
+                if output_text:
+                    primer_sections.append(output_text.strip())
+                elif error_info:
+                    primer_sections.append(f"Error: {error_info.get('message')}")
+                else:
+                    primer_sections.append("Error: No output returned.")
+
+                if deep_research_effective:
+                    sheet_entry["deep_research_effective"] = True
+                if deep_research_error_reason and sheet_entry["deep_research_error_reason"] is None:
+                    sheet_entry["deep_research_error_reason"] = deep_research_error_reason
+
+                if (not first_sheet_written) and step_number == 1:
+                    primer_path = output_dir_path / "primer_step1_company_introduction.md"
+                    sources_path = output_dir_path / "sources_step1.json"
+                    if output_text and output_text.strip():
+                        primer_path.write_text(
+                            "# Company Introduction\n\n" + output_text.strip() + "\n",
+                            encoding="utf-8",
+                        )
+                    sources_payload = {
+                        "prompt": prompt,
+                        "model": model,
+                        "reasoning_effort_requested": reasoning_effort,
+                        "reasoning_effort_effective": effort_effective,
+                        "web_search": web_search_enabled,
+                        "deep_research_requested": deep_research_requested,
+                        "deep_research_effective": deep_research_effective,
+                        "deep_research_error_reason": deep_research_error_reason,
+                        "web_tool_type": web_tool_type,
+                        "request_used": request_used,
+                        "response": _response_to_dict(response) if response is not None else None,
+                        "error": error_info,
+                    }
+                    if not output_text or not output_text.strip():
+                        sources_payload["error"] = sources_payload["error"] or {}
+                        sources_payload["error"]["message"] = "No output returned for step 1."
+                    sources_path.write_text(
+                        json.dumps(sources_payload, indent=2, ensure_ascii=False), encoding="utf-8"
+                    )
+                    first_sheet_written = True
+            except Exception as err:
+                step_entry["error"] = {"type": type(err).__name__, "message": str(err)}
+                primer_sections.append(heading)
+                primer_sections.append(f"Error: {err}")
+
+            sheet_entry["steps"].append(step_entry)
+            step_number += 1
+
+        sources_payload["sheets"].append(sheet_entry)
+
+    if not sources_payload["sheets"]:
+        raise SystemExit("ERROR: no runnable sheets executed.")
 
     log_step("Saving outputs")
-    primer_path = output_dir_path / "primer_step1_company_introduction.md"
-    primer_path.write_text(
-        "# Company Introduction\n\n" + (output_text or "").strip() + "\n",
-        encoding="utf-8",
-    )
+    primer_path = output_dir_path / "primer.md"
+    primer_path.write_text("\n\n".join(primer_sections).strip() + "\n", encoding="utf-8")
 
-    sources_path = output_dir_path / "sources_step1.json"
-    sources_payload = {
-        "prompt": prompt,
-        "model": model,
-        "reasoning_effort_requested": reasoning_effort,
-        "reasoning_effort_effective": effort_effective,
-        "web_search": web_search_enabled,
-        "deep_research_requested": deep_research_requested,
-        "deep_research_effective": deep_research_effective,
-        "deep_research_error_reason": deep_research_error_reason,
-        "web_tool_type": web_tool_type,
-        "request_used": request_used,
-        "response": _response_to_dict(response),
-        "error": error_info,
-    }
+    sources_path = output_dir_path / "sources.json"
     sources_path.write_text(json.dumps(sources_payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
     print(f"Saved: {primer_path}")
