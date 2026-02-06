@@ -5,11 +5,8 @@ import os
 from pathlib import Path
 import tempfile
 
-from primer_ops.primer import (
-    resolve_lead_input_path,
-    resolve_output_dir,
-    sanitize_folder_name,
-)
+from primer_ops.client_repo import ensure_client_repo, sanitize_folder_name
+from primer_ops.primer import resolve_lead_input_path, resolve_output_dir
 
 
 def _set_env(name: str, value: str | None) -> None:
@@ -24,6 +21,17 @@ def test_sanitize_folder_name() -> None:
     assert sanitize_folder_name("Foo . ") == "Foo"
     assert sanitize_folder_name("Bar...") == "Bar"
     assert sanitize_folder_name("  Mega   Corp  ") == "Mega Corp"
+
+
+def test_ensure_client_repo_paths() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        base_dir = Path(tmp)
+        repo = ensure_client_repo(base_dir, "Acme<>:\"/\\|?*  Corp")
+        assert repo["repo_root"].exists()
+        assert repo["dossier_dir"].exists()
+        assert repo["latest_dir"].exists()
+        assert repo["runs_dir"].exists()
+        assert repo["lead_input_path"].parent == repo["dossier_dir"]
 
 
 def test_lead_input_resolution_independent_from_output_dir() -> None:
@@ -53,6 +61,7 @@ def test_lead_input_resolution_independent_from_output_dir() -> None:
 
 def main() -> None:
     test_sanitize_folder_name()
+    test_ensure_client_repo_paths()
     test_lead_input_resolution_independent_from_output_dir()
     print("OK")
 

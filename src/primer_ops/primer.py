@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 import re
 import time
+from datetime import datetime
+import uuid
 from typing import Any, Iterable, Optional
 
 from primer_ops.progress import spinner, format_seconds
@@ -12,6 +14,7 @@ from dotenv import find_dotenv, load_dotenv
 from openai import APITimeoutError, OpenAI, NotFoundError, RateLimitError
 from openpyxl import load_workbook
 
+from primer_ops.client_repo import ensure_client_repo, sanitize_folder_name
 from primer_ops.config import get_lead_input_path, get_output_base_dir, get_output_dir
 
 def _normalize(text: str) -> str:
@@ -93,8 +96,6 @@ _REMINDER_LINE_RE = re.compile(r"^\s*\(here\s+copy\s+and\s+paste.*\)\s*$", re.IG
 _REMINDER_SENTENCE = "(here copy and paste introduction from 'company and industry intro' step 1)"
 _CONTEXT_HEADER_RE = re.compile(r"^\s*###\s*context\b", re.IGNORECASE)
 _SECTION_HEADER_RE = re.compile(r"^\s*###\s+", re.IGNORECASE)
-_INVALID_FOLDER_CHARS_RE = re.compile(r"[<>:\"/\\\\|?*]")
-_MAX_FOLDER_NAME_LEN = 80
 
 
 def _strip_human_reminders(text: str) -> str:
@@ -109,17 +110,6 @@ def _strip_human_reminders(text: str) -> str:
             continue
         filtered.append(line)
     return "\n".join(filtered)
-
-
-def sanitize_folder_name(name: str) -> str:
-    if name is None:
-        return ""
-    cleaned = _INVALID_FOLDER_CHARS_RE.sub("", str(name))
-    cleaned = " ".join(cleaned.split())
-    cleaned = cleaned.rstrip(" .")
-    if _MAX_FOLDER_NAME_LEN and len(cleaned) > _MAX_FOLDER_NAME_LEN:
-        cleaned = cleaned[:_MAX_FOLDER_NAME_LEN].rstrip(" .")
-    return cleaned
 
 
 def _extract_company_name(lead: dict[str, Any]) -> str:
@@ -332,6 +322,16 @@ def _safe_write_json(path: Path, payload: dict[str, Any]) -> None:
     _safe_write_text(path, content)
 
 
+def _safe_write_text_multi(paths: Iterable[Path], content: str) -> None:
+    for path in paths:
+        _safe_write_text(path, content)
+
+
+def _safe_write_json_multi(paths: Iterable[Path], payload: dict[str, Any]) -> None:
+    for path in paths:
+        _safe_write_json(path, payload)
+
+
 def _confirm_continue_after_timeout() -> bool:
     prompt = "Request timed out after 30 minutes. Continue and retry? [y/N]: "
     while True:
@@ -414,10 +414,6 @@ def generate_primer(
     if not isinstance(lead, dict):
         raise SystemExit("ERROR: lead_input.json must contain a JSON object.")
 
-    output_dir_path = resolve_output_dir(output_dir, lead)
-    output_dir_path.mkdir(parents=True, exist_ok=True)
-    print(f"Resolved output dir: {output_dir_path}")
-
     prompt_library_path = os.getenv("PROMPT_LIBRARY_PATH", "").strip()
     if not prompt_library_path:
         raise SystemExit("ERROR: PROMPT_LIBRARY_PATH is not set. Please set it in the .env file.")
@@ -428,6 +424,46 @@ def generate_primer(
     base_sleep_seconds = float(os.getenv("OPENAI_RETRY_BASE_SECONDS", "").strip() or 0.5)
 
     company_name = _extract_company_name(lead)
+    output_dir_override: Path | None = None
+    if output_dir and output_dir.strip():
+        output_dir_override = Path(output_dir.strip())
+    else:
+        output_dir_override = _extract_output_dir_override(lead)
+
+    run_output_dir_path: Path | None = None
+    if output_dir_override is not None:
+        output_dir_path = output_dir_override
+        output_dir_path.mkdir(parents=True, exist_ok=True)
+        print(f"Resolved output dir: {output_dir_path}")
+    else:
+        base_dir = get_output_base_dir() or get_output_dir()
+        if base_dir is None:
+            raise SystemExit(
+                "ERROR: OUTPUT_BASE_DIR is not set. Please set it in the .env file. "
+                "(Legacy OUTPUT_DIR is also supported.)"
+            )
+        repo = ensure_client_repo(base_dir, company_name)
+        repo_root = repo["repo_root"]
+        latest_dir = repo["latest_dir"]
+        runs_dir = repo["runs_dir"]
+        run_date = datetime.now().strftime("%Y-%m-%d")
+        run_id = uuid.uuid4().hex[:8]
+        run_output_dir_path = runs_dir / f"{run_date}_{run_id}"
+        run_output_dir_path.mkdir(parents=True, exist_ok=True)
+        output_dir_path = latest_dir
+        print(f"Client repo: {repo_root}")
+        print(f"Writing latest to: {latest_dir}")
+        print(f"Writing run to: {run_output_dir_path}")
+
+    output_dirs: list[Path] = [output_dir_path]
+    if run_output_dir_path is not None:
+        output_dirs.append(run_output_dir_path)
+
+    def write_output_text(filename: str, content: str) -> None:
+        _safe_write_text_multi([path / filename for path in output_dirs], content)
+
+    def write_output_json(filename: str, payload: dict[str, Any]) -> None:
+        _safe_write_json_multi([path / filename for path in output_dirs], payload)
     lead_plus = dict(lead)
     lead_plus["client"] = company_name
     lead_plus["company"] = company_name
@@ -808,12 +844,10 @@ def generate_primer(
                         sheet_entry["deep_research_error_reason"] = deep_research_error_reason
 
                     if (not first_sheet_written) and step_number == 1:
-                        primer_path = output_dir_path / "primer_step1_company_introduction.md"
-                        sources_path = output_dir_path / "sources_step1.json"
                         if output_text and output_text.strip():
-                            primer_path.write_text(
+                            write_output_text(
+                                "primer_step1_company_introduction.md",
                                 "# Company Introduction\n\n" + output_text.strip() + "\n",
-                                encoding="utf-8",
                             )
                         legacy_sources_payload = {
                             "prompt": prompt_final,
@@ -832,10 +866,7 @@ def generate_primer(
                         if not output_text or not output_text.strip():
                             legacy_sources_payload["error"] = legacy_sources_payload["error"] or {}
                             legacy_sources_payload["error"]["message"] = "No output returned for step 1."
-                        sources_path.write_text(
-                            json.dumps(legacy_sources_payload, indent=2, ensure_ascii=False),
-                            encoding="utf-8",
-                        )
+                        write_output_json("sources_step1.json", legacy_sources_payload)
                         first_sheet_written = True
 
                 primer_sections.append(heading)
@@ -852,8 +883,8 @@ def generate_primer(
                 primer_sections.append(f"Error: {err}")
 
             primer_content = "\n\n".join(primer_sections).strip() + "\n"
-            _safe_write_text(output_dir_path / "primer.md", primer_content)
-            _safe_write_json(output_dir_path / "sources.json", sources_payload)
+            write_output_text("primer.md", primer_content)
+            write_output_json("sources.json", sources_payload)
             step_number += 1
 
         prev_sheet_output_text = "\n\n".join(current_sheet_output_sections).strip()
@@ -863,14 +894,14 @@ def generate_primer(
         raise SystemExit("ERROR: no runnable sheets executed.")
 
     log_step("Saving outputs")
-    primer_path = output_dir_path / "primer.md"
     primer_content = "\n\n".join(primer_sections).strip() + "\n"
-    _safe_write_text(primer_path, primer_content)
+    write_output_text("primer.md", primer_content)
+    write_output_json("sources.json", sources_payload)
 
-    sources_path = output_dir_path / "sources.json"
-    _safe_write_json(sources_path, sources_payload)
-
-    print(f"Saved: {primer_path}")
-    print(f"Saved: {sources_path}")
+    print(f"Saved: {output_dir_path / 'primer.md'}")
+    print(f"Saved: {output_dir_path / 'sources.json'}")
+    if run_output_dir_path is not None:
+        print(f"Saved: {run_output_dir_path / 'primer.md'}")
+        print(f"Saved: {run_output_dir_path / 'sources.json'}")
     elapsed = time.perf_counter() - t0
     print(f"Done in {format_seconds(elapsed)}", flush=True)
