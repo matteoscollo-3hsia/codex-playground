@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import time
+import traceback
 from datetime import datetime
 import uuid
 from typing import Any, Iterable, Optional
@@ -155,6 +156,47 @@ def resolve_output_dir(output_dir: str | None, lead: dict[str, Any]) -> Path:
     company_name = _extract_company_name(lead)
     folder_name = sanitize_folder_name(company_name) or "unknown_company"
     return base_dir / folder_name
+
+
+def resolve_output_targets(output_dir: str | None, lead: dict[str, Any]) -> dict[str, Any]:
+    company_name = _extract_company_name(lead)
+    output_dir_override: Path | None = None
+    if output_dir and output_dir.strip():
+        output_dir_override = Path(output_dir.strip())
+    else:
+        output_dir_override = _extract_output_dir_override(lead)
+
+    if output_dir_override is not None:
+        output_dir_override.mkdir(parents=True, exist_ok=True)
+        return {
+            "output_dir": output_dir_override,
+            "run_dir": None,
+            "output_dirs": [output_dir_override],
+            "repo_root": None,
+            "latest_dir": None,
+        }
+
+    base_dir = get_output_base_dir() or get_output_dir()
+    if base_dir is None:
+        raise SystemExit(
+            "ERROR: OUTPUT_BASE_DIR is not set. Please set it in the .env file. "
+            "(Legacy OUTPUT_DIR is also supported.)"
+        )
+    repo = ensure_client_repo(base_dir, company_name)
+    repo_root = repo["repo_root"]
+    latest_dir = repo["latest_dir"]
+    runs_dir = repo["runs_dir"]
+    run_date = datetime.now().strftime("%Y-%m-%d")
+    run_id = uuid.uuid4().hex[:8]
+    run_output_dir_path = runs_dir / f"{run_date}_{run_id}"
+    run_output_dir_path.mkdir(parents=True, exist_ok=True)
+    return {
+        "output_dir": latest_dir,
+        "run_dir": run_output_dir_path,
+        "output_dirs": [latest_dir, run_output_dir_path],
+        "repo_root": repo_root,
+        "latest_dir": latest_dir,
+    }
 
 
 def _build_prev_context_block(
@@ -332,6 +374,14 @@ def _safe_write_json_multi(paths: Iterable[Path], payload: dict[str, Any]) -> No
         _safe_write_json(path, payload)
 
 
+def _is_verbose() -> bool:
+    for name in ("PRIMER_VERBOSE", "VERBOSE"):
+        value = os.getenv(name, "").strip().lower()
+        if value in ("1", "true", "yes", "y", "on"):
+            return True
+    return False
+
+
 def _confirm_continue_after_timeout() -> bool:
     prompt = "Request timed out after 30 minutes. Continue and retry? [y/N]: "
     while True:
@@ -423,41 +473,21 @@ def generate_primer(
     max_retries = int(os.getenv("OPENAI_MAX_RETRIES", "").strip() or 6)
     base_sleep_seconds = float(os.getenv("OPENAI_RETRY_BASE_SECONDS", "").strip() or 0.5)
 
-    company_name = _extract_company_name(lead)
-    output_dir_override: Path | None = None
-    if output_dir and output_dir.strip():
-        output_dir_override = Path(output_dir.strip())
-    else:
-        output_dir_override = _extract_output_dir_override(lead)
+    targets = resolve_output_targets(output_dir, lead)
+    output_dir_path = targets["output_dir"]
+    run_output_dir_path = targets["run_dir"]
+    output_dirs: list[Path] = targets["output_dirs"]
 
-    run_output_dir_path: Path | None = None
-    if output_dir_override is not None:
-        output_dir_path = output_dir_override
-        output_dir_path.mkdir(parents=True, exist_ok=True)
+    repo_root = targets["repo_root"]
+    latest_dir = targets["latest_dir"]
+    if repo_root is None:
         print(f"Resolved output dir: {output_dir_path}")
     else:
-        base_dir = get_output_base_dir() or get_output_dir()
-        if base_dir is None:
-            raise SystemExit(
-                "ERROR: OUTPUT_BASE_DIR is not set. Please set it in the .env file. "
-                "(Legacy OUTPUT_DIR is also supported.)"
-            )
-        repo = ensure_client_repo(base_dir, company_name)
-        repo_root = repo["repo_root"]
-        latest_dir = repo["latest_dir"]
-        runs_dir = repo["runs_dir"]
-        run_date = datetime.now().strftime("%Y-%m-%d")
-        run_id = uuid.uuid4().hex[:8]
-        run_output_dir_path = runs_dir / f"{run_date}_{run_id}"
-        run_output_dir_path.mkdir(parents=True, exist_ok=True)
-        output_dir_path = latest_dir
         print(f"Client repo: {repo_root}")
         print(f"Writing latest to: {latest_dir}")
         print(f"Writing run to: {run_output_dir_path}")
 
-    output_dirs: list[Path] = [output_dir_path]
-    if run_output_dir_path is not None:
-        output_dirs.append(run_output_dir_path)
+    company_name = _extract_company_name(lead)
 
     def write_output_text(filename: str, content: str) -> None:
         _safe_write_text_multi([path / filename for path in output_dirs], content)
@@ -539,6 +569,22 @@ def generate_primer(
             sources_payload["prompt_library_path"] = str(prompt_path)
             if not isinstance(sources_payload.get("sheets"), list):
                 sources_payload["sheets"] = []
+
+    if isinstance(sources_payload.get("sheets"), list):
+        existing_sheets = set(workbook.sheetnames)
+        original_count = len(sources_payload["sheets"])
+        sources_payload["sheets"] = [
+            entry
+            for entry in sources_payload["sheets"]
+            if isinstance(entry, dict)
+            and isinstance(entry.get("name"), str)
+            and entry["name"] in existing_sheets
+        ]
+        removed_count = original_count - len(sources_payload["sheets"])
+        if removed_count:
+            print(
+                f"Removed {removed_count} sheet(s) from sources.json not present in prompt library."
+            )
 
     first_sheet_written = False
     prev_sheet_output_text = get_initial_context(output_dir_path)
@@ -897,6 +943,40 @@ def generate_primer(
     primer_content = "\n\n".join(primer_sections).strip() + "\n"
     write_output_text("primer.md", primer_content)
     write_output_json("sources.json", sources_payload)
+
+    template_path_value = os.getenv("PRIMER_WORD_TEMPLATE_PATH", "").strip()
+    template_path: Path | None = None
+    if template_path_value:
+        candidate = Path(template_path_value)
+        if not candidate.is_absolute():
+            repo_root = Path(__file__).resolve().parents[2]
+            candidate = repo_root / candidate
+        template_path = candidate
+
+    try:
+        from primer_ops.render_docx import render_primer_docx
+    except Exception as err:
+        print(f"DOCX render skipped/failed: {err}")
+        if _is_verbose():
+            traceback.print_exc()
+    else:
+        for out_dir in output_dirs:
+            md_path = out_dir / "primer.md"
+            if not md_path.exists():
+                print(f"DOCX render skipped/failed: {md_path} not found")
+                continue
+            docx_path = md_path.with_suffix(".docx")
+            try:
+                render_primer_docx(
+                    str(md_path),
+                    str(docx_path),
+                    str(template_path) if template_path else None,
+                )
+                print(f"Saved: {docx_path}")
+            except Exception as err:
+                print(f"DOCX render failed: {err}")
+                if _is_verbose():
+                    traceback.print_exc()
 
     print(f"Saved: {output_dir_path / 'primer.md'}")
     print(f"Saved: {output_dir_path / 'sources.json'}")

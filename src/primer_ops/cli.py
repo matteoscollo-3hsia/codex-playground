@@ -14,7 +14,14 @@ def main() -> int:
     create_parser.add_argument(
         "--lead-output",
         default=None,
-        help="Path to write lead_input.json (default: ./lead_input.json)",
+        help="Path to write lead_input.json (overrides --company-name placement)",
+    )
+    create_parser.add_argument(
+        "--company-name",
+        "--client",
+        dest="company_name",
+        default=None,
+        help="Company name used to place lead_input.json under the client repo layout",
     )
     gen_parser = subparsers.add_parser("generate-primer", help="Generate primer")
     gen_parser.add_argument(
@@ -52,7 +59,7 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.command == "create-input":
-        run_create_input(lead_output=args.lead_output)
+        run_create_input(lead_output=args.lead_output, company_name=args.company_name)
         return 0
 
     if args.command == "generate-primer":

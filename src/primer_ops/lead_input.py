@@ -6,6 +6,8 @@ from pathlib import Path
 from dotenv import find_dotenv, load_dotenv
 from pydantic import BaseModel, Field, ValidationError
 
+from primer_ops.client_repo import ensure_client_repo
+from primer_ops.config import get_output_base_dir, get_output_dir
 class LeadInput(BaseModel):
     company_name: str = Field(min_length=1)
     company_website: str = Field(default="")
@@ -34,13 +36,23 @@ def prompt_float(label: str) -> float:
             print("  -> Please enter a valid number (e.g., 75 or 75.5).")
 
 
-def run_create_input(lead_output: str | None = None) -> None:
+def run_create_input(lead_output: str | None = None, company_name: str | None = None) -> None:
     env_path = find_dotenv(usecwd=True)
     load_dotenv(env_path, override=True)
-    out_path = Path(lead_output) if lead_output else Path("lead_input.json")
+    out_path: Path
+    if lead_output:
+        out_path = Path(lead_output)
+    else:
+        base_dir = get_output_base_dir() or get_output_dir()
+        if base_dir is not None and company_name and company_name.strip():
+            repo = ensure_client_repo(base_dir, company_name)
+            out_path = repo["lead_input_path"]
+        else:
+            out_path = Path("lead_input.json")
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    print("\n=== Lead Input Wizard (writes lead_input.json to the specified path) ===\n")
+    print("\n=== Lead Input Wizard ===\n")
+    print(f"Lead input path: {out_path}\n")
 
     data = {
         "company_name": prompt_str("Company name", required=True),
