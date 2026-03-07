@@ -44,7 +44,7 @@ from primer_ops.openai_helpers import (
     _is_model_not_found_error,
     _model_supports_reasoning_effort,
 )
-from primer_ops.progress import format_seconds
+from primer_ops.progress import LiveTimer, format_seconds, print_sheet_bar
 
 # Keep these public for backwards compatibility (used by tests).
 _safe_write_text_multi = _safe_write_text_multi
@@ -591,6 +591,7 @@ def generate_primer(
 
     for sheet_index, sheet_name in enumerate(selected_sheets, start=1):
         ws = workbook[sheet_name]
+        sheet_t0 = time.perf_counter()
         log_step(f"Parsing sheet anchors and building prompt ({sheet_name})")
         instructions_cell = _require_anchor(
             _find_anchor_exact(ws, "Instructions"), "Instructions"
@@ -807,7 +808,8 @@ def generate_primer(
                     response: Any | None = None
 
                     call_start = time.perf_counter()
-                    print(f"{call_label} Calling OpenAI...")
+                    _timer = LiveTimer(f"{call_label} Calling OpenAI...")
+                    _timer.start()
                     if deep_research_requested:
                         request_kwargs = {
                             "model": deep_model,
@@ -885,8 +887,9 @@ def generate_primer(
                     effort_effective = (
                         None if deep_research_effective else reasoning_effort
                     )
+                    _timer.stop()
                     call_elapsed = time.perf_counter() - call_start
-                    print(f"{call_label} Done in {format_seconds(call_elapsed)}")
+                    print(f"  {call_label} Done in {format_seconds(call_elapsed)}", flush=True)
 
                     print(
                         " ".join(
@@ -965,6 +968,7 @@ def generate_primer(
 
         prev_sheet_output_text = "\n\n".join(current_sheet_output_sections).strip()
         prev_sheet_name = sheet_name
+        print_sheet_bar(sheet_index, len(selected_sheets), sheet_name, time.perf_counter() - sheet_t0)
 
     if not sources_payload["sheets"]:
         raise SystemExit("ERROR: no runnable sheets executed.")
