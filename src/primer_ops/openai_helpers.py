@@ -158,11 +158,9 @@ def _model_supports_reasoning_effort(model: str | None) -> bool:
 
 def _is_model_not_found_error(err: Exception) -> bool:
     msg = str(err).lower()
-    if isinstance(err, NotFoundError):
-        return ("model" in msg) or ("model_not_found" in msg)
-    status_code = getattr(err, "status_code", None)
-    if status_code == 404:
-        return ("model" in msg) or ("model_not_found" in msg)
+    is_404 = isinstance(err, NotFoundError) or getattr(err, "status_code", None) == 404
+    if is_404:
+        return "model" in msg
     return "model_not_found" in msg
 
 

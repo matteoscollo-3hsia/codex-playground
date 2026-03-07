@@ -29,13 +29,17 @@ def prompt_str(label: str, required: bool = False) -> str:
         return val
 
 
+_PROMPT_MAX_RETRIES = 10
+
+
 def prompt_float(label: str) -> float:
-    while True:
+    for _ in range(_PROMPT_MAX_RETRIES):
         raw = input(f"{label} (number): ").strip().replace(",", ".")
         try:
             return float(raw)
         except ValueError:
             print("  -> Please enter a valid number (e.g., 75 or 75.5).")
+    raise SystemExit(f"Too many invalid inputs for '{label}'. Exiting.")
 
 
 def _resolve_output_path(lead_output: str | None, company_name: str) -> Path:

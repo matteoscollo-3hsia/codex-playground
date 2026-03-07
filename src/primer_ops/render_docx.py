@@ -668,7 +668,12 @@ def _markdown_parser() -> Any:
 
 
 def _is_markdown_it(parser: Any) -> bool:
-    return parser.__class__.__name__ == "MarkdownIt"
+    try:
+        from markdown_it import MarkdownIt  # type: ignore
+
+        return isinstance(parser, MarkdownIt)
+    except ImportError:
+        return False
 
 
 def _init_document(template_path: Path | None) -> tuple[Document, _DocWriter]:
@@ -706,7 +711,10 @@ def _find_placeholder_paragraph(doc: Document, placeholder: str) -> Paragraph | 
 def _remove_placeholder_text(paragraph: Paragraph, placeholder: str) -> None:
     if placeholder not in paragraph.text:
         return
-    paragraph.text = paragraph.text.replace(placeholder, "")
+    # Update individual runs to preserve bold/italic/font formatting.
+    for run in paragraph.runs:
+        if placeholder in run.text:
+            run.text = run.text.replace(placeholder, "")
 
 
 def _insert_paragraph_after(paragraph: Paragraph) -> Paragraph:
@@ -1070,15 +1078,21 @@ def _apply_placeholder_replacements(doc: Document, md_file: Path) -> None:
 def _replace_text_in_paragraph(
     paragraph: Paragraph, replacements: dict[str, str]
 ) -> None:
-    text = paragraph.text
-    if not text:
+    if not paragraph.text:
         return
-    updated = text
-    for key, value in replacements.items():
-        if key in updated:
-            updated = updated.replace(key, value)
-    if updated != text:
-        paragraph.text = updated
+    if not any(key in paragraph.text for key in replacements):
+        return
+    # Update individual runs to preserve bold/italic/font formatting.
+    # Note: placeholders spanning multiple runs will not be replaced.
+    for run in paragraph.runs:
+        if not run.text:
+            continue
+        updated = run.text
+        for key, value in replacements.items():
+            if key in updated:
+                updated = updated.replace(key, value)
+        if updated != run.text:
+            run.text = updated
 
 
 def _remove_paragraph(paragraph: Paragraph) -> None:

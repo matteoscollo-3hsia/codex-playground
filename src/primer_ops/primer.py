@@ -8,7 +8,7 @@ import traceback
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 from dotenv import find_dotenv, load_dotenv
 from openai import NotFoundError, OpenAI, RateLimitError
@@ -16,6 +16,8 @@ from openpyxl import load_workbook
 
 from primer_ops.client_repo import ensure_client_repo, sanitize_folder_name
 from primer_ops.config import (
+    get_base_model,
+    get_deep_model,
     get_include_headings,
     get_lead_input_path,
     get_output_base_dir,
@@ -48,6 +50,44 @@ from primer_ops.progress import LiveTimer, format_seconds, print_sheet_bar
 
 # Keep these public for backwards compatibility (used by tests).
 _safe_write_text_multi = _safe_write_text_multi
+
+
+# ---------------------------------------------------------------------------
+# Data structures for sources.json payload
+# Using TypedDict so existing dict-access patterns (step_entry["key"]) are
+# unchanged at runtime, but IDE autocomplete and static analysis work.
+# ---------------------------------------------------------------------------
+
+
+class StepEntry(TypedDict, total=False):
+    step_number: int
+    title: str
+    prompt: str | None
+    response_text: str
+    model: str | None
+    reasoning_effort_requested: str | None
+    reasoning_effort_effective: str | None
+    web_search: bool
+    deep_research_requested: bool
+    web_tool_type: str | None
+    deep_research_effective: bool
+    deep_research_error_reason: str | None
+    error: str | None
+    citations: list[str]
+
+
+class SheetEntry(TypedDict, total=False):
+    name: str
+    web_search: bool
+    deep_research_requested: bool
+    deep_research_effective: bool
+    deep_research_error_reason: str | None
+    steps: list[StepEntry]
+
+
+class SourcesPayload(TypedDict):
+    prompt_library_path: str
+    sheets: list[SheetEntry]
 
 
 _REMINDER_LINE_RE = re.compile(
@@ -231,7 +271,7 @@ def _coerce_str_list(value: Any) -> list[str]:
     return []
 
 
-def _sanitize_sources_payload(payload: dict[str, Any]) -> dict[str, Any]:
+def _sanitize_sources_payload(payload: dict[str, Any]) -> SourcesPayload:
     if not isinstance(payload, dict):
         return {"prompt_library_path": "", "sheets": []}
     sanitized: dict[str, Any] = {
@@ -332,14 +372,14 @@ def _error_is_empty(error: Any) -> bool:
     return False
 
 
-def _step_is_completed(step_entry: dict[str, Any]) -> bool:
+def _step_is_completed(step_entry: StepEntry) -> bool:
     if not _error_is_empty(step_entry.get("error")):
         return False
     response_text = _ensure_response_text(step_entry) or ""
     return bool(response_text.strip())
 
 
-def get_initial_context(sources_payload: dict[str, Any]) -> str:
+def get_initial_context(sources_payload: SourcesPayload) -> str:
     if not isinstance(sources_payload, dict):
         return ""
     sheets = sources_payload.get("sheets")
@@ -446,10 +486,8 @@ def generate_primer(
             "ERROR: PROMPT_LIBRARY_PATH is not set. Please set it in the .env file."
         )
 
-    base_model = os.getenv("OPENAI_MODEL", "").strip() or "gpt-5.2"
-    deep_model = (
-        os.getenv("OPENAI_DEEP_RESEARCH_MODEL", "").strip() or "o4-mini-deep-research"
-    )
+    base_model = get_base_model()
+    deep_model = get_deep_model()
     max_retries = int(os.getenv("OPENAI_MAX_RETRIES", "").strip() or 6)
     base_sleep_seconds = float(
         os.getenv("OPENAI_RETRY_BASE_SECONDS", "").strip() or 0.5
@@ -546,7 +584,7 @@ def generate_primer(
         ["# Commercial Primer"] if include_headings_effective else []
     )
     sources_path = output_dir_path / "sources.json"
-    sources_payload: dict[str, Any] = {
+    sources_payload: SourcesPayload = {
         "prompt_library_path": str(prompt_path),
         "sheets": [],
     }
@@ -582,7 +620,7 @@ def generate_primer(
     )
     client = OpenAI(timeout=_REQUEST_TIMEOUT_SECONDS)
 
-    sheets_by_name: dict[str, dict[str, Any]] = {}
+    sheets_by_name: dict[str, SheetEntry] = {}
     for sheet_entry in sources_payload.get("sheets", []) or []:
         if isinstance(sheet_entry, dict) and isinstance(sheet_entry.get("name"), str):
             sheets_by_name[sheet_entry["name"]] = sheet_entry
@@ -663,7 +701,7 @@ def generate_primer(
 
         prompts_cell = _require_anchor(_find_anchor_exact(ws, "Prompts"), "Prompts")
         current_sheet_output_sections: list[str] = []
-        steps_by_number: dict[int, dict[str, Any]] = {}
+        steps_by_number: dict[int, StepEntry] = {}
         for existing_step in sheet_entry.get("steps", []) or []:
             if not isinstance(existing_step, dict):
                 continue
@@ -774,6 +812,16 @@ def generate_primer(
                     prev_sheet_name_used,
                     prev_sheet_output_chars,
                 ) = _post_process_prompt(prompt_original, prev_sheet_name, context_text)
+                # Warn if prompt is very large (≈4 chars/token; 128K-token models → ~512K chars).
+                # No truncation — this is a diagnostic only. See CLAUDE.md known issue #2.
+                _prompt_chars = len(prompt_final)
+                if _prompt_chars > 400_000:
+                    print(
+                        f"WARNING: {step_label} prompt is {_prompt_chars:,} chars "
+                        f"(~{_prompt_chars // 4:,} tokens). "
+                        "This may exceed the model context window.",
+                        flush=True,
+                    )
                 step_entry["title"] = step_title_clean or step_label
                 step_entry["prompt"] = prompt_final
                 step_entry["web_search"] = web_search_enabled

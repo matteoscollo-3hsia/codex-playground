@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 
 import httpx
 
@@ -10,6 +11,8 @@ logger = logging.getLogger(__name__)
 _BASE = "https://api.hubapi.com"
 _COMPANY_PROPS = ["name", "website", "domain", "country", "industry", "annualrevenue"]
 _CONTACT_PROPS = ["firstname", "lastname", "jobtitle"]
+_MAX_RETRIES = 4
+_RETRY_BASE_SLEEP = 1.0  # seconds; doubles on each attempt (1s, 2s, 4s, 8s)
 
 
 def _headers() -> dict[str, str]:
@@ -22,11 +25,28 @@ def _headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
 
+def _request_with_retry(method: str, url: str, **kwargs) -> httpx.Response:
+    """Execute an httpx request with exponential backoff on 429 rate-limit responses."""
+    for attempt in range(_MAX_RETRIES + 1):
+        response = httpx.request(method, url, **kwargs)
+        if response.status_code != 429:
+            return response
+        retry_after = int(response.headers.get("Retry-After", _RETRY_BASE_SLEEP * (2**attempt)))
+        logger.warning(
+            "HubSpot rate limit hit (attempt %d/%d). Retrying in %ds.",
+            attempt + 1,
+            _MAX_RETRIES,
+            retry_after,
+        )
+        time.sleep(retry_after)
+    return response  # return last response to let caller handle it
+
+
 def search_companies(query: str) -> list[dict]:
     """Search HubSpot companies by name (up to 10 results)."""
     url = f"{_BASE}/crm/v3/objects/companies/search"
     body = {"query": query, "properties": _COMPANY_PROPS, "limit": 10}
-    response = httpx.post(url, json=body, headers=_headers(), timeout=15)
+    response = _request_with_retry("POST", url, json=body, headers=_headers(), timeout=15)
     response.raise_for_status()
     return response.json().get("results", [])
 
@@ -34,7 +54,7 @@ def search_companies(query: str) -> list[dict]:
 def get_associated_contacts(company_id: str) -> list[dict]:
     """Fetch contacts associated with a company (up to 3)."""
     url = f"{_BASE}/crm/v4/objects/companies/{company_id}/associations/contacts"
-    response = httpx.get(url, headers=_headers(), timeout=15)
+    response = _request_with_retry("GET", url, headers=_headers(), timeout=15)
     if response.status_code == 404:
         return []
     response.raise_for_status()
@@ -42,7 +62,8 @@ def get_associated_contacts(company_id: str) -> list[dict]:
     contacts: list[dict] = []
     for assoc in response.json().get("results", [])[:3]:
         contact_id = assoc["toObjectId"]
-        c_resp = httpx.get(
+        c_resp = _request_with_retry(
+            "GET",
             f"{_BASE}/crm/v3/objects/contacts/{contact_id}",
             params={"properties": ",".join(_CONTACT_PROPS)},
             headers=_headers(),

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any, Iterable
+
+logger = logging.getLogger(__name__)
 
 
 def _safe_write_text(path: Path, content: str) -> None:
@@ -10,14 +13,16 @@ def _safe_write_text(path: Path, content: str) -> None:
     try:
         tmp_path.write_text(content, encoding="utf-8")
         tmp_path.replace(path)
-    except OSError:
+    except OSError as exc:
+        logger.warning("Failed to write %s: %s", path, exc)
         return
 
 
 def _safe_write_json(path: Path, payload: dict[str, Any]) -> None:
     try:
         content = json.dumps(payload, indent=2, ensure_ascii=False)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as exc:
+        logger.warning("Failed to serialize JSON for %s: %s", path, exc)
         return
     _safe_write_text(path, content)
 

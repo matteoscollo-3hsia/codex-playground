@@ -8,9 +8,7 @@ _MAX_FOLDER_NAME_LEN = 80
 
 
 def sanitize_folder_name(name: str) -> str:
-    if name is None:
-        return ""
-    cleaned = _INVALID_FOLDER_CHARS_RE.sub("", str(name))
+    cleaned = _INVALID_FOLDER_CHARS_RE.sub("", name)
     cleaned = " ".join(cleaned.split())
     cleaned = cleaned.rstrip(" .")
     if _MAX_FOLDER_NAME_LEN and len(cleaned) > _MAX_FOLDER_NAME_LEN:
