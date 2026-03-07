@@ -2,7 +2,10 @@
 
 ## Project Purpose
 
-Generates **commercial primer** documents (Word/DOCX) from an Excel prompt library using the OpenAI API. The package is `primer_ops` (src layout). Users run a two-step CLI: create a lead input JSON, then generate the primer.
+Generates **commercial primer** documents (Word/DOCX) from an Excel prompt library using the OpenAI API. The package is `primer_ops` (src layout). Users run a two-step CLI: create a lead input JSON, then generate the primer. The HubSpot path enriches `lead_input.json` with company data, contact data, and `deal_notes` from the Notes associated with the selected deal.
+
+Primary pipeline entrypoint for real runs: `uv run python run.py create-input --from-hubspot "ACME"`.
+Primer generation command after lead creation: `uv run python run.py generate-primer`.
 
 ## Development Environment
 
@@ -18,9 +21,9 @@ uv run pytest                        # run all tests
 uv run pytest tests/unit/            # unit tests only
 uv run ruff check src/ tests/        # lint
 uv run ruff format src/ tests/       # format
+uv run python run.py create-input --from-hubspot "ACME" # primary pipeline start: company + contact + associated deal notes
+uv run python run.py generate-primer                     # start primer generation from the resolved lead_input.json
 uv run python run.py create-input                        # interactive lead input wizard
-uv run python run.py create-input --from-hubspot "ACME" # fetch lead data from HubSpot
-uv run python run.py generate-primer                     # generate primer from Excel + lead JSON
 uv run python run.py generate-primer --resume            # resume from existing sources.json
 ```
 
@@ -34,8 +37,8 @@ uv run python run.py generate-primer --resume            # resume from existing 
 run.py / src/primer_ops/cli.py       ← CLI entry points (argparse)
 src/primer_ops/
   config.py         ← env var helpers (OUTPUT_BASE_DIR, LEAD_INPUT_PATH, INCLUDE_HEADINGS)
-  lead_input.py     ← Pydantic LeadInput model + interactive wizard + run_create_input_from_hubspot()
-  hubspot_client.py ← HubSpot API client: search_companies, get_associated_contacts, fetch_lead_from_hubspot
+  lead_input.py     ← Pydantic LeadInput model (includes deal_notes) + wizard + HubSpot completion flow
+  hubspot_client.py ← HubSpot API client: companies, contacts, deals, associated notes, fetch_lead_from_hubspot
   client_repo.py    ← company folder structure: latest/ + runs/<date>_<uuid>/
   primer.py         ← main orchestrator: generate_primer() (~620 lines — intentionally monolithic for now)
   excel_helpers.py  ← anchor parsing, placeholder replacement (4 syntaxes: {{k}}, {k}, #k#, << k >>)
@@ -50,7 +53,7 @@ src/primer_ops/
 ### Data Flow
 
 ```
-Lead JSON + Excel prompt library
+HubSpot company/contact/deal-notes or manual Lead JSON + Excel prompt library
     → sheet filtering (include/exclude)
     → per-sheet: parse anchors → replace placeholders → call OpenAI → save to sources.json
     → accumulate markdown → render primer.docx
@@ -58,6 +61,18 @@ Lead JSON + Excel prompt library
 ```
 
 Resume logic: if `sources.json` exists, completed steps are skipped automatically.
+
+## Prompt Authoring
+
+If a prompt template needs an internal-context subsection such as `### 1.2 What we know so far`, use `{{deal_notes}}` directly.
+
+Rules for that subsection:
+- Base it only on `{{deal_notes}}`
+- Rewrite it into a clean consultant-style synthesis
+- Remove CRM noise, duplicated notes, greetings, and scheduling artefacts
+- Do not mix website research into that subsection
+- Do not infer facts not explicitly present in `{{deal_notes}}`
+- If `{{deal_notes}}` is empty or not informative enough, output `N/A`
 
 ## Code Conventions
 
@@ -101,8 +116,9 @@ See `.env.example` for a complete reference. **Never commit `.env`.**
 
 ### HubSpot setup (for `--from-hubspot`)
 1. HubSpot → Settings → Integrations → **Private Apps** → create app
-2. Required scopes: `crm.objects.companies.read`, `crm.objects.contacts.read`
+2. Required scopes: `crm.objects.companies.read`, `crm.objects.contacts.read`, `crm.objects.deals.read`
 3. Set the generated token as `HUBSPOT_TOKEN` in `.env`
+4. `deal_notes` must come from the real HubSpot Notes associated with the selected deal (`hs_note_body`), not from `deal.description`
 
 ## Testing
 

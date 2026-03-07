@@ -16,12 +16,18 @@ uv sync
 
 # Configure environment
 cp .env.example .env
-# Edit .env: set OPENAI_API_KEY, PROMPT_LIBRARY_PATH, OUTPUT_BASE_DIR, PRIMER_WORD_TEMPLATE_PATH
+# Edit .env: set OPENAI_API_KEY, PROMPT_LIBRARY_PATH, OUTPUT_BASE_DIR, PRIMER_WORD_TEMPLATE_PATH, HUBSPOT_TOKEN
 
-# Create a lead input interactively
+# Core pipeline entrypoint: create lead input from HubSpot Private App
+uv run python run.py create-input --from-hubspot "ACME"
+
+# Start the primer generation from the saved lead_input.json
+uv run python run.py generate-primer
+
+# Or create a lead input interactively
 uv run python run.py create-input
 
-# Generate a primer
+# Or generate a primer from an explicit lead_input path
 uv run python run.py generate-primer --lead-input path/to/lead_input.json
 ```
 
@@ -29,16 +35,17 @@ uv run python run.py generate-primer --lead-input path/to/lead_input.json
 
 ### `create-input`
 
-Create a lead input file interactively.
+Create a lead input file interactively or fetch it from HubSpot. For real runs, `--from-hubspot` is the primary pipeline entrypoint.
 
 ```
-uv run python run.py create-input [--lead-output PATH] [--company-name NAME]
+uv run python run.py create-input [--lead-output PATH] [--company-name NAME] [--from-hubspot QUERY]
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--lead-output` | Path to write `lead_input.json` (overrides default placement) |
 | `--company-name` | Company name used to place file under client repo layout |
+| `--from-hubspot` | Fetch lead data from HubSpot by company name (requires `HUBSPOT_TOKEN`) |
 
 ### `generate-primer`
 
@@ -58,6 +65,33 @@ uv run python run.py generate-primer [OPTIONS]
 | `--resume` / `--no-resume` | Resume from existing `sources.json` (default: enabled) |
 | `--include-headings` | Include sheet/step headings in `primer.md` (default: disabled) |
 
+## Lead Input Fields
+
+`lead_input.json` can now include:
+
+| Field | Description |
+|------|-------------|
+| `deal_notes` | Concatenated HubSpot Notes (`hs_note_body`) associated with the selected deal |
+
+When using `create-input --from-hubspot`, the tool fetches company data, primary contact data, and `deal_notes` from the real HubSpot Notes associated with the selected deal.
+
+## Prompting With `deal_notes`
+
+For a subsection such as `### 1.2 What we know so far`, use `{{deal_notes}}` directly and constrain the prompt explicitly so the model rewrites those notes without mixing them with website research.
+
+Recommended rule block:
+
+```text
+### SPECIAL RULE FOR SECTION 1.2 WHAT WE KNOW SO FAR
+- Section 1.2 must be based only on the content of `{{deal_notes}}`.
+- Rewrite the notes into a clean, concise, consultant-style synthesis.
+- Do not copy the notes verbatim unless strictly necessary.
+- Remove duplicates, meeting logistics, greetings, and CRM artefacts.
+- Do not add facts from website research to section 1.2.
+- Do not infer facts that are not explicitly supported by `{{deal_notes}}`.
+- If `{{deal_notes}}` is empty, missing, or not informative enough, write exactly: N/A
+```
+
 ## Output Resolution
 
 1. `--output-dir` flag (if provided, used as final output folder)
@@ -75,6 +109,7 @@ uv run python run.py generate-primer [OPTIONS]
 | `OUTPUT_BASE_DIR` | Base directory for per-client output repos |
 | `LEAD_INPUT_PATH` | Default lead input path (fallback when `--lead-input` not passed) |
 | `PRIMER_WORD_TEMPLATE_PATH` | Path to the Word template for DOCX output |
+| `HUBSPOT_TOKEN` | HubSpot Private App token used by `create-input --from-hubspot` |
 | `INCLUDE_HEADINGS` | Include headings in output (`1`/`true` to enable) |
 
 ## Scripts
@@ -100,7 +135,8 @@ sales-ops-automation/
 │       ├── config.py               # Environment variable helpers
 │       ├── excel_helpers.py        # Excel/worksheet anchor and cell utilities
 │       ├── io_helpers.py           # Atomic file write utilities
-│       ├── lead_input.py           # Lead input model and interactive wizard
+│       ├── lead_input.py           # Lead input model, deal_notes field, and interactive wizard
+│       ├── hubspot_client.py       # HubSpot company/contact/deal/note retrieval
 │       ├── openai_helpers.py       # OpenAI API calls, retries, response parsing
 │       ├── primer.py               # Core primer generation orchestration
 │       ├── progress.py             # Spinner and time formatting
@@ -113,6 +149,8 @@ sales-ops-automation/
 │   ├── test_output_resolution.py   # Output path resolution tests
 │   ├── test_primer_headings.py     # End-to-end primer generation test
 │   └── unit/
+│       ├── test_hubspot_client.py
+│       ├── test_lead_input_hubspot.py
 │       └── test_markdown_normalize.py
 └── docs/
     └── review.md                   # Code review cleanup plan
