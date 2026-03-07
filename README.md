@@ -21,8 +21,8 @@ cp .env.example .env
 # Core pipeline entrypoint: create lead input from HubSpot Private App
 uv run python run.py create-input --from-hubspot "ACME"
 
-# Start primer generation from the client lead_input.json
-uv run python run.py generate-primer --lead-input "primers/NOME CLIENTE/_dossier/lead_input.json"
+# Start primer generation from an explicit lead_input path
+uv run python run.py generate-primer --lead-input path/to/lead_input.json
 
 # Or create a lead input interactively
 uv run python run.py create-input
@@ -49,7 +49,7 @@ uv run python run.py create-input [--lead-output PATH] [--company-name NAME] [--
 Generate a commercial primer from an Excel prompt library.
 
 ```
-uv run python run.py generate-primer --lead-input "primers/NOME CLIENTE/_dossier/lead_input.json" [OPTIONS]
+uv run python run.py generate-primer --lead-input path/to/lead_input.json [OPTIONS]
 ```
 
 | Flag | Description |
@@ -75,9 +75,10 @@ When using `create-input --from-hubspot`, the tool fetches company data, primary
 By default, lead inputs are saved under:
 
 ```text
-primers/<NOME CLIENTE>/_dossier/lead_input.json
+<OUTPUT_BASE_DIR>/<NOME CLIENTE>/_dossier/lead_input.json
 ```
 
+In this repo that typically resolves under `primers/`, but the portable rule is `OUTPUT_BASE_DIR/<NOME CLIENTE>/_dossier/lead_input.json`.
 The folder name is derived from the company name and sanitized for filesystem-invalid characters.
 
 ## Prompting With `deal_notes`
