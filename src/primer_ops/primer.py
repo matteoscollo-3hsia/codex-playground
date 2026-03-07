@@ -371,12 +371,10 @@ def get_initial_context(sources_payload: dict[str, Any]) -> str:
     return ""
 
 
-def _resolve_template_path() -> Path:
+def _resolve_template_path() -> Path | None:
     template_path_value = os.getenv("PRIMER_WORD_TEMPLATE_PATH", "").strip()
     if not template_path_value:
-        raise SystemExit(
-            "ERROR: PRIMER_WORD_TEMPLATE_PATH is not set. DOCX output is required."
-        )
+        return None
     candidate = Path(template_path_value)
     if not candidate.is_absolute():
         repo_root = Path(__file__).resolve().parents[2]
@@ -1006,7 +1004,7 @@ def generate_primer(
             render_primer_docx(
                 str(md_path),
                 str(docx_path),
-                str(template_path),
+                str(template_path) if template_path else None,
             )
             print(f"Saved: {docx_path}")
         except Exception as err:
