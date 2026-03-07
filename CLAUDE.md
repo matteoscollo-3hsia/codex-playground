@@ -5,7 +5,7 @@
 Generates **commercial primer** documents (Word/DOCX) from an Excel prompt library using the OpenAI API. The package is `primer_ops` (src layout). Users run a two-step CLI: create a lead input JSON, then generate the primer. The HubSpot path enriches `lead_input.json` with company data, contact data, and `deal_notes` from the Notes associated with the selected deal.
 
 Primary pipeline entrypoint for real runs: `uv run python run.py create-input --from-hubspot "ACME"`.
-Primer generation command after lead creation: `uv run python run.py generate-primer`.
+Primer generation command after lead creation: `uv run python run.py generate-primer --lead-input path/to/lead_input.json`.
 
 ## Development Environment
 
@@ -22,9 +22,9 @@ uv run pytest tests/unit/            # unit tests only
 uv run ruff check src/ tests/        # lint
 uv run ruff format src/ tests/       # format
 uv run python run.py create-input --from-hubspot "ACME" # primary pipeline start: company + contact + associated deal notes
-uv run python run.py generate-primer                     # start primer generation from the resolved lead_input.json
+uv run python run.py generate-primer --lead-input path/to/lead_input.json # generic primer command with explicit lead input path
 uv run python run.py create-input                        # interactive lead input wizard
-uv run python run.py generate-primer --resume            # resume from existing sources.json
+uv run python run.py generate-primer --lead-input path/to/lead_input.json --resume # resume from existing sources.json
 ```
 
 ### Claude Slash Commands

@@ -21,14 +21,11 @@ cp .env.example .env
 # Core pipeline entrypoint: create lead input from HubSpot Private App
 uv run python run.py create-input --from-hubspot "ACME"
 
-# Start the primer generation from the saved lead_input.json
-uv run python run.py generate-primer
+# Start primer generation from an explicit lead_input path
+uv run python run.py generate-primer --lead-input path/to/lead_input.json
 
 # Or create a lead input interactively
 uv run python run.py create-input
-
-# Or generate a primer from an explicit lead_input path
-uv run python run.py generate-primer --lead-input path/to/lead_input.json
 ```
 
 ## CLI Reference
@@ -52,7 +49,7 @@ uv run python run.py create-input [--lead-output PATH] [--company-name NAME] [--
 Generate a commercial primer from an Excel prompt library.
 
 ```
-uv run python run.py generate-primer [OPTIONS]
+uv run python run.py generate-primer --lead-input path/to/lead_input.json [OPTIONS]
 ```
 
 | Flag | Description |
