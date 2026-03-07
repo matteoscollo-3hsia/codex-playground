@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 
-from primer_ops.lead_input import run_create_input
+from primer_ops.lead_input import run_create_input, run_create_input_from_hubspot
 from primer_ops.primer import generate_primer
 
 
@@ -24,6 +24,13 @@ def main() -> int:
         dest="company_name",
         default=None,
         help="Company name used to place lead_input.json under the client repo layout",
+    )
+    create_parser.add_argument(
+        "--from-hubspot",
+        dest="from_hubspot",
+        default=None,
+        metavar="QUERY",
+        help="Fetch lead data from HubSpot by company name instead of using the wizard",
     )
     gen_parser = subparsers.add_parser("generate-primer", help="Generate primer")
     gen_parser.add_argument(
@@ -67,7 +74,13 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.command == "create-input":
-        run_create_input(lead_output=args.lead_output, company_name=args.company_name)
+        if args.from_hubspot:
+            run_create_input_from_hubspot(
+                query=args.from_hubspot,
+                lead_output=args.lead_output,
+            )
+        else:
+            run_create_input(lead_output=args.lead_output, company_name=args.company_name)
         return 0
 
     if args.command == "generate-primer":

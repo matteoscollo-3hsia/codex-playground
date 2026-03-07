@@ -38,25 +38,52 @@ def prompt_float(label: str) -> float:
             print("  -> Please enter a valid number (e.g., 75 or 75.5).")
 
 
+def _resolve_output_path(lead_output: str | None, company_name: str) -> Path:
+    if lead_output:
+        return Path(lead_output)
+    base_dir = get_output_base_dir()
+    if base_dir is not None and company_name.strip():
+        repo = ensure_client_repo(base_dir, company_name)
+        return repo["lead_input_path"]
+    return Path("lead_input.json")
+
+
+def _save_lead(lead: LeadInput, out_path: Path) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(
+        json.dumps(lead.model_dump(), indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    print(f"\nSaved: {out_path}\n")
+
+
+def run_create_input_from_hubspot(
+    query: str,
+    lead_output: str | None = None,
+) -> None:
+    from primer_ops.hubspot_client import fetch_lead_from_hubspot
+
+    env_path = find_dotenv(usecwd=True)
+    load_dotenv(env_path, override=True)
+
+    print(f"\nFetching from HubSpot: {query}\n")
+    lead = fetch_lead_from_hubspot(query)
+
+    print("Lead data fetched from HubSpot:")
+    for key, value in lead.model_dump().items():
+        print(f"  {key}: {value}")
+
+    out_path = _resolve_output_path(lead_output, lead.company_name)
+    _save_lead(lead, out_path)
+
+
 def run_create_input(
     lead_output: str | None = None, company_name: str | None = None
 ) -> None:
     env_path = find_dotenv(usecwd=True)
     load_dotenv(env_path, override=True)
-    out_path: Path
-    if lead_output:
-        out_path = Path(lead_output)
-    else:
-        base_dir = get_output_base_dir()
-        if base_dir is not None and company_name and company_name.strip():
-            repo = ensure_client_repo(base_dir, company_name)
-            out_path = repo["lead_input_path"]
-        else:
-            out_path = Path("lead_input.json")
-    out_path.parent.mkdir(parents=True, exist_ok=True)
 
     print("\n=== Lead Input Wizard ===\n")
-    print(f"Lead input path: {out_path}\n")
 
     data = {
         "company_name": prompt_str("Company name", required=True),
@@ -79,9 +106,6 @@ def run_create_input(
         print(e)
         raise SystemExit(1)
 
-    out_path.write_text(
-        json.dumps(lead.model_dump(), indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-
-    print(f"\nSaved: {out_path}\n")
+    out_path = _resolve_output_path(lead_output, lead.company_name if not company_name else company_name)
+    print(f"Lead input path: {out_path}\n")
+    _save_lead(lead, out_path)
