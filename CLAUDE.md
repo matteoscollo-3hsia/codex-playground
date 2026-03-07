@@ -18,9 +18,15 @@ uv run pytest                        # run all tests
 uv run pytest tests/unit/            # unit tests only
 uv run ruff check src/ tests/        # lint
 uv run ruff format src/ tests/       # format
-uv run python run.py create-input    # interactive lead input wizard
-uv run python run.py generate-primer # generate primer from Excel + lead JSON
+uv run python run.py create-input                        # interactive lead input wizard
+uv run python run.py create-input --from-hubspot "ACME" # fetch lead data from HubSpot
+uv run python run.py generate-primer                     # generate primer from Excel + lead JSON
+uv run python run.py generate-primer --resume            # resume from existing sources.json
 ```
+
+### Claude Slash Commands
+
+- `/project:new-client-run` — guided end-to-end run for a new client (HubSpot fetch → confirm → generate)
 
 ## Architecture
 
@@ -28,14 +34,17 @@ uv run python run.py generate-primer # generate primer from Excel + lead JSON
 run.py / src/primer_ops/cli.py       ← CLI entry points (argparse)
 src/primer_ops/
   config.py         ← env var helpers (OUTPUT_BASE_DIR, LEAD_INPUT_PATH, INCLUDE_HEADINGS)
-  lead_input.py     ← Pydantic LeadInput model + interactive wizard
+  lead_input.py     ← Pydantic LeadInput model + interactive wizard + run_create_input_from_hubspot()
+  hubspot_client.py ← HubSpot API client: search_companies, get_associated_contacts, fetch_lead_from_hubspot
   client_repo.py    ← company folder structure: latest/ + runs/<date>_<uuid>/
   primer.py         ← main orchestrator: generate_primer() (~620 lines — intentionally monolithic for now)
   excel_helpers.py  ← anchor parsing, placeholder replacement (4 syntaxes: {{k}}, {k}, #k#, << k >>)
   openai_helpers.py ← API calls, exponential backoff retry, citation extraction
   io_helpers.py     ← atomic writes (.tmp → rename), multi-path output
   render_docx.py    ← Markdown → DOCX via markdown-it-py + python-docx
-  progress.py       ← spinner, time formatting
+  progress.py       ← LiveTimer, print_sheet_bar, spinner (with elapsed time), format_seconds
+.claude/commands/
+  new-client-run.md ← /project:new-client-run slash command
 ```
 
 ### Data Flow
@@ -77,13 +86,23 @@ Follow the coding standards in [skills/coding-standards/SKILL.md](skills/coding-
 | Variable | Purpose | Default |
 |---|---|---|
 | `OPENAI_API_KEY` | OpenAI authentication | required |
-| `OUTPUT_BASE_DIR` | Base directory for output | `./output` |
-| `LEAD_INPUT_PATH` | Path to lead JSON file | `./data/lead_input.json` |
+| `OPENAI_MODEL` | Base model name | `gpt-5.2` |
+| `OPENAI_DEEP_RESEARCH_MODEL` | Deep research model | `o4-mini-deep-research` |
+| `OPENAI_MAX_RETRIES` | Max retry attempts | `6` |
+| `OPENAI_RETRY_BASE_SECONDS` | Exponential backoff base | `0.5` |
+| `OUTPUT_BASE_DIR` | Base directory for primer output | required |
+| `LEAD_INPUT_PATH` | Path to lead JSON file | `./lead_input.json` |
 | `INCLUDE_HEADINGS` | Add section headings to output | `false` |
 | `PROMPT_LIBRARY_PATH` | Path to Excel prompt library | required |
-| `DOCX_TEMPLATE_PATH` | Word template for DOCX rendering | optional |
+| `PRIMER_WORD_TEMPLATE_PATH` | Word template for DOCX rendering | optional — uses default styles if unset |
+| `HUBSPOT_TOKEN` | HubSpot Private App token for `--from-hubspot` | optional |
 
-See `.env.example` for a complete reference.
+See `.env.example` for a complete reference. **Never commit `.env`.**
+
+### HubSpot setup (for `--from-hubspot`)
+1. HubSpot → Settings → Integrations → **Private Apps** → create app
+2. Required scopes: `crm.objects.companies.read`, `crm.objects.contacts.read`
+3. Set the generated token as `HUBSPOT_TOKEN` in `.env`
 
 ## Testing
 
